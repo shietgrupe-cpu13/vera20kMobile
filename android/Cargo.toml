@@ -22,6 +22,7 @@ crate-type = ["cdylib"]
 [features]
 default = ["dev-overlays"]
 dev-overlays = ["vera20k/dev-overlays"]
+perf = ["vera20k/perf"]
 
 [target.'cfg(target_os = "android")'.dependencies]
 # The client, for entry::run_with_loop and the App it drives.
