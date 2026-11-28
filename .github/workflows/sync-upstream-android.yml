@@ -315,7 +315,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ needs.prepare.outputs.base_sha }}
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Download upstream merge bundle when needed
         if: needs.prepare.outputs.changed == 'true'
@@ -343,7 +343,44 @@ jobs:
           toolchain: stable
           targets: aarch64-linux-android
 
+      - name: Calculate native source identity and cache key
+        id: native-key
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Exclude only launcher Java/Kotlin and Android resource files.
+          # Everything else (including workflow, shaders, terrain and build scripts)
+          # conservatively invalidates the library.
+          exclusions=(':(exclude)android/app/src/main/java/**' ':(exclude)android/app/src/main/res/**')
+          native_commit="$(git log -1 --format=%H "$SOURCE_SHA" -- . "${exclusions[@]}")"
+          test -n "$native_commit"
+          fingerprint="$(git ls-tree -r "$SOURCE_SHA" | awk -F '\t' '$2 !~ /^android\/app\/src\/main\/(java|res)\//' | sha256sum | cut -d' ' -f1)"
+          toolchain="$(rustc -vV | sha256sum | cut -d' ' -f1)"
+          echo "VERA20K_COMMIT=$native_commit" >> "$GITHUB_ENV"
+          echo "native_commit=$native_commit" >> "$GITHUB_OUTPUT"
+          echo "key=ih-native-v1-${RUNNER_OS}-${ImageVersion:-unknown}-$ANDROID_NDK_VERSION-$BUILD_PROFILE-$toolchain-$native_commit-$fingerprint" >> "$GITHUB_OUTPUT"
+
+      - name: Restore exact native library cache
+        id: native-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            android/app/src/main/jniLibs/arm64-v8a/libvera20k_android.so
+            .native-cache-sha256
+          key: ${{ steps.native-key.outputs.key }}
+
+      - name: Verify cached native library
+        if: steps.native-cache.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum --check .native-cache-sha256
+          mkdir -p build-logs
+          echo "Exact native library cache hit; skipped ARM64 compilation." | tee build-logs/rust-android-arm64.log
+          echo "Native library cache hit" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Cache ARM64 Cargo artifacts
+        if: steps.native-cache.outputs.cache-hit != 'true'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: android-new-arm64
@@ -352,11 +389,13 @@ jobs:
           key: ${{ needs.prepare.outputs.build_profile }}
 
       - name: Set up Android SDK
+        if: steps.native-cache.outputs.cache-hit != 'true'
         uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
         with:
           packages: "platform-tools platforms;android-36 build-tools;36.1.0"
 
       - name: Install pinned Android NDK
+        if: steps.native-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -364,6 +403,7 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
 
       - name: Install cargo-ndk
+        if: steps.native-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           if ! cargo ndk --version 2>/dev/null | grep -Fq "4.1.2"; then
@@ -371,9 +411,11 @@ jobs:
           fi
 
       - name: Set up Rust compiler cache
+        if: steps.native-cache.outputs.cache-hit != 'true'
         uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Enable compiler caching for ARM64 build
+        if: steps.native-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
@@ -381,6 +423,7 @@ jobs:
           echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
 
       - name: Build optimized ARM64 native library
+        if: steps.native-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -390,7 +433,7 @@ jobs:
             2>&1 | tee build-logs/rust-android-arm64.log
 
       - name: Report compiler cache statistics
-        if: always()
+        if: always() && steps.native-cache.outputs.cache-hit != 'true'
         run: sccache --show-stats || true
 
       - name: Verify native library alignment and record hash
@@ -400,7 +443,7 @@ jobs:
           native=android/app/src/main/jniLibs/arm64-v8a/libvera20k_android.so
           test -s "$native"
           readelf -lW "$native" | tee build-logs/native-program-headers.txt
-          python3 - "$native" "$SOURCE_SHA" "$BUILD_TYPE" <<'PY'
+          python3 - "$native" "$SOURCE_SHA" "$BUILD_TYPE" "$VERA20K_COMMIT" <<'PY'
           import re
           import sys
           from hashlib import sha256
@@ -409,6 +452,7 @@ jobs:
           native = Path(sys.argv[1])
           source_sha = sys.argv[2]
           build_type = sys.argv[3]
+          native_commit = sys.argv[4]
           text = __import__("subprocess").check_output(["readelf", "-lW", str(native)], text=True)
           alignments = [
               int(match.group(1), 16)
@@ -421,12 +465,25 @@ jobs:
               raise SystemExit(f"ARM64 LOAD alignment is below 16 KB: {alignments}")
           Path("dist").mkdir(exist_ok=True)
           Path("dist/native-build-manifest.txt").write_text(
-              f"source_sha={source_sha}\nbuild_type={build_type}\n"
+              f"source_sha={source_sha}\nbuild_type={build_type}\nnative_source_sha={native_commit}\n"
               f"sha256={sha256(native.read_bytes()).hexdigest()}\n"
               f"load_alignments={','.join(hex(value) for value in alignments)}\n"
           )
           print(f"Verified ARM64 LOAD alignments: {alignments}")
           PY
+
+      - name: Record native library cache checksum
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        run: sha256sum android/app/src/main/jniLibs/arm64-v8a/libvera20k_android.so > .native-cache-sha256
+
+      - name: Save verified native library cache
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            android/app/src/main/jniLibs/arm64-v8a/libvera20k_android.so
+            .native-cache-sha256
+          key: ${{ steps.native-key.outputs.key }}
 
       - name: Stage native artifact with a flat download layout
         shell: bash
