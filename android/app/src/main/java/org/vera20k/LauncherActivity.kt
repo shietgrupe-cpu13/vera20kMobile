@@ -1271,7 +1271,7 @@ class LauncherActivity : Activity() {
             }, REQUEST_PICK_ARES)
         }, margin(top = 8))
         ares.addView(actionButton(
-            if (downloadingAres) "DOWNLOADING OFFICIAL ARES..." else "DOWNLOAD OFFICIAL ARES ARCHIVE",
+            if (downloadingAres) "DOWNLOADING OFFICIAL ARES..." else "DOWNLOAD / UPDATE OFFICIAL ARES ARCHIVE",
             primary = false,
         ) { if (!downloadingAres) downloadOfficialAresArchive() }, margin(top = 6))
         if (modCatalog.selectedMod == null) {
@@ -1802,11 +1802,7 @@ class LauncherActivity : Activity() {
     }
 
     private fun downloadOfficialAresArchive() {
-        if (File(engineDataDirectory(), "Mods/AresSupport/ares.mix").isFile) {
-            modImportNote = "A shared ares.mix is already installed. Remove it from Documents/RA2Harbor/Mods/AresSupport before importing or downloading a replacement; no file was overwritten."
-            renderPage()
-            return
-        }
+        if (downloadingAres) return
         downloadingAres = true
         modImportNote = "Downloading the pinned Ares release and checking its SHA-256..."
         renderPage()
@@ -1827,8 +1823,36 @@ class LauncherActivity : Activity() {
                     .joinToString("") { "%02x".format(it) }
                 if (digest != ARES_RELEASE_SHA256) throw IOException("The downloaded Ares archive failed its integrity check")
                 val storage = SharedDataStorage(this)
-                storage.copyLocalFile("Mods/AresSupport", temporaryFile)
-                "Official Ares archive downloaded and verified. Confirm that this release matches the selected mod."
+                val root = storage.directRootPath()
+                    ?: throw IOException("Grant All files access to update the shared Ares archive")
+                val directory = File(root, "Mods/AresSupport").canonicalFile
+                if (!directory.toPath().startsWith(root.canonicalFile.toPath())) throw IOException("Unsafe Ares folder")
+                val destination = File(directory, "ares.mix")
+                if (destination.isFile && java.security.MessageDigest.getInstance("SHA-256")
+                        .digest(destination.readBytes()).joinToString("") { "%02x".format(it) } == ARES_RELEASE_SHA256) {
+                    "Official Ares archive is already up to date."
+                } else {
+                    val staged = File.createTempFile(".ares-update-", ".tmp", directory)
+                    try {
+                        temporaryFile.inputStream().use { input ->
+                            java.io.FileOutputStream(staged).use { output ->
+                                input.copyTo(output)
+                                output.fd.sync()
+                            }
+                        }
+                        if (destination.exists()) {
+                            if (!destination.isFile) throw IOException("Ares archive path is not a file")
+                            val backup = File.createTempFile("ares-backup-", ".bak", directory)
+                            destination.copyTo(backup, overwrite = true)
+                        }
+                        java.nio.file.Files.move(staged.toPath(), destination.toPath(),
+                            java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                        "Official Ares archive verified and installed. Previous archive retained if present. Confirm compatibility with the selected mod."
+                    } finally {
+                        staged.delete()
+                    }
+                }
             }
             temporaryDirectory.deleteRecursively()
             runOnUiThread {
