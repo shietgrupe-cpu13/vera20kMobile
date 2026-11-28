@@ -8,7 +8,7 @@ on:
       build_type:
         description: "Build an installable debug APK or signed release APK"
         type: choice
-        options: [debug, release]
+        options: [debug, release, perf]
         default: debug
         required: true
       publish_release:
@@ -29,7 +29,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: sync-android-new-${{ github.event_name == 'workflow_dispatch' && inputs.build_type || 'debug' }}
+  group: sync-android-new-${{ github.event_name == 'workflow_dispatch' && inputs.build_type || (github.event_name == 'push' && 'perf' || 'debug') }}
   cancel-in-progress: true
 
 jobs:
@@ -46,7 +46,7 @@ jobs:
       build_type: ${{ steps.upstream.outputs.build_type }}
       build_profile: ${{ steps.upstream.outputs.build_profile }}
     env:
-      BUILD_TYPE: ${{ inputs.build_type || 'debug' }}
+      BUILD_TYPE: ${{ inputs.build_type || (github.event_name == 'push' && 'perf' || 'debug') }}
       PUBLISH_RELEASE: ${{ inputs.publish_release || false }}
       HAS_RELEASE_API_TOKEN: ${{ secrets.ANDROID_RELEASE_GITHUB_TOKEN != '' }}
     steps:
@@ -69,7 +69,7 @@ jobs:
           base_sha="$(git rev-parse HEAD)"
           upstream_sha="$(git rev-parse upstream/main)"
           changed=false
-          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/android-new ]]; then
+          if [[ "$BUILD_TYPE" == perf || ( "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/android-new ) ]]; then
             echo "Building fork revision without automatic upstream merge; scheduled sync remains strict."
             upstream_sha="$(git merge-base "$base_sha" "$upstream_sha")"
           elif git merge-base --is-ancestor "$upstream_sha" "$base_sha"; then
@@ -91,7 +91,7 @@ jobs:
             exit 1
           fi
           build_profile=fast
-          if [[ "$BUILD_TYPE" == release ]]; then build_profile=shipping; fi
+          if [[ "$BUILD_TYPE" == release || "$BUILD_TYPE" == perf ]]; then build_profile=shipping; fi
           validate=false
           if [[ "$(git rev-parse HEAD)" != "$(git rev-parse origin/android-new)" ]] ||
              [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] ||
@@ -390,7 +390,7 @@ jobs:
           toolchain="$(rustc -vV | sha256sum | cut -d' ' -f1)"
           echo "VERA20K_COMMIT=$native_commit" >> "$GITHUB_ENV"
           echo "native_commit=$native_commit" >> "$GITHUB_OUTPUT"
-          echo "key=ih-native-v1-${RUNNER_OS}-${ImageVersion:-unknown}-$ANDROID_NDK_VERSION-$BUILD_PROFILE-$toolchain-$native_commit-$fingerprint" >> "$GITHUB_OUTPUT"
+          echo "key=ih-native-v1-${RUNNER_OS}-${ImageVersion:-unknown}-$ANDROID_NDK_VERSION-$BUILD_PROFILE-$BUILD_TYPE-$toolchain-$native_commit-$fingerprint" >> "$GITHUB_OUTPUT"
 
       - name: Restore exact native library cache
         id: native-cache
@@ -460,8 +460,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p build-logs
+          perf_features=()
+          if [[ "$BUILD_TYPE" == perf ]]; then perf_features=(--features perf); fi
           cargo ndk -t arm64-v8a --platform 26 -o android/app/src/main/jniLibs build \
-            --profile "$BUILD_PROFILE" -p vera20k-android --no-default-features \
+            --profile "$BUILD_PROFILE" -p vera20k-android --no-default-features "${perf_features[@]}" \
             2>&1 | tee build-logs/rust-android-arm64.log
 
       - name: Report compiler cache statistics
@@ -653,12 +655,14 @@ jobs:
               -storepass android -alias androiddebugkey -keypass android \
               -keyalg RSA -keysize 2048 -validity 10000 \
               -dname "CN=Android Debug,O=Android,C=US"
-            bash .github/scripts/gradle-with-network-retry.sh -p android \
+            perf_args=()
+            if [[ "$BUILD_TYPE" == perf ]]; then perf_args=(-PironHarborPerf=true); fi
+            bash .github/scripts/gradle-with-network-retry.sh -p android "${perf_args[@]}" \
               :app:assembleDebug --no-daemon --max-workers=2
           fi
 
       - name: Apply persistent signing to debug APK
-        if: needs.prepare.outputs.build_type == 'debug'
+        if: needs.prepare.outputs.build_type != 'release'
         env:
           ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
           ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
@@ -704,6 +708,7 @@ jobs:
             apk=android/app/build/outputs/apk/release/app-release.apk
           else
             expected_id=org.ironharbor.mobile.debug
+            if [[ "$BUILD_TYPE" == perf ]]; then expected_id=org.ironharbor.mobile.perf; fi
             apk=android/app/build/outputs/apk/debug/app-debug.apk
           fi
           tools="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS"
@@ -722,6 +727,7 @@ jobs:
           test "$actual_native_sha" = "$expected_native_sha"
           mkdir -p dist
           suffix=".debug"
+          if [[ "$BUILD_TYPE" == perf ]]; then suffix=".perf"; fi
           if [[ "$BUILD_TYPE" == release ]]; then suffix=""; fi
           output="dist/IronHarborMobile ${build_label}${suffix}.apk"
           cp "$apk" "$output"
