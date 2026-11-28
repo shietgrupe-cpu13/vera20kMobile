@@ -184,6 +184,16 @@ jobs:
           shared-key: android-new-engine-tests
           key: host-test-support
 
+      - name: Set up host Rust compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Enable compiler caching for engine tests
+        shell: bash
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+
       - name: Install Linux audio headers
         shell: bash
         run: |
@@ -216,6 +226,10 @@ jobs:
             python -m tools.cargo_run -- test -p vera20k --lib app::input::dispatch::android_hud_group_tests::
             python -m tools.cargo_run -- test -p vera20k --lib render::skirmish_shell_chrome::
           } 2>&1 | tee build-logs/engine-tests.log
+
+      - name: Report host compiler cache statistics
+        if: always()
+        run: sccache --show-stats || true
 
       - name: Upload engine test log
         if: always()
