@@ -23,6 +23,7 @@ on:
       - "Cargo.lock"
       - "src/**"
       - "android/**"
+      - ".github/workflows/sync-upstream-android.yml"
 
 permissions:
   contents: read
@@ -68,7 +69,10 @@ jobs:
           base_sha="$(git rev-parse HEAD)"
           upstream_sha="$(git rev-parse upstream/main)"
           changed=false
-          if git merge-base --is-ancestor "$upstream_sha" "$base_sha"; then
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/android-new ]]; then
+            echo "Building fork revision without automatic upstream merge; scheduled sync remains strict."
+            upstream_sha="$(git merge-base "$base_sha" "$upstream_sha")"
+          elif git merge-base --is-ancestor "$upstream_sha" "$base_sha"; then
             echo "android-new already contains upstream $upstream_sha"
           else
             # Keep the candidate local until every dependent job validates it.
@@ -361,7 +365,20 @@ jobs:
 
       - name: Install cargo-ndk
         shell: bash
-        run: cargo install cargo-ndk --version 4.1.2 --locked
+        run: |
+          if ! cargo ndk --version 2>/dev/null | grep -Fq "4.1.2"; then
+            cargo install cargo-ndk --version 4.1.2 --locked
+          fi
+
+      - name: Set up Rust compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Enable compiler caching for ARM64 build
+        shell: bash
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
 
       - name: Build optimized ARM64 native library
         shell: bash
@@ -371,6 +388,10 @@ jobs:
           cargo ndk -t arm64-v8a --platform 26 -o android/app/src/main/jniLibs build \
             --profile "$BUILD_PROFILE" -p vera20k-android --no-default-features \
             2>&1 | tee build-logs/rust-android-arm64.log
+
+      - name: Report compiler cache statistics
+        if: always()
+        run: sccache --show-stats || true
 
       - name: Verify native library alignment and record hash
         shell: bash
