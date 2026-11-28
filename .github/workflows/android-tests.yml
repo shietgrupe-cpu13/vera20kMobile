@@ -1,6 +1,11 @@
 name: Android launcher tests
 
 on:
+  push:
+    branches: [android-new]
+    paths:
+      - 'android/**'
+      - '.github/workflows/android-tests.yml'
   pull_request:
     paths:
       - "android/**"
