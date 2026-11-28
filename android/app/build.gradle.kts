@@ -104,7 +104,7 @@ android {
     buildTypes {
         debug {
             isMinifyEnabled = false
-            applicationIdSuffix = ".debug"
+            applicationIdSuffix = if (providers.gradleProperty("ironHarborPerf").orNull == "true") ".perf" else ".debug"
         }
         release {
             // Keep JVM entry points named for the native JNI callbacks.
