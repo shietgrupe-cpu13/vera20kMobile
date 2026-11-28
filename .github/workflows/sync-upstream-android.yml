@@ -178,16 +178,41 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Calculate exact regression identity
+        id: regression-key
+        shell: bash
+        run: |
+          set -euo pipefail
+          fingerprint="$(git ls-tree -r "$SOURCE_SHA" | awk -F '\t' '$2 !~ /^android\/app\/src\/main\/(java|res)\//' | sha256sum | cut -d' ' -f1)"
+          toolchain="$(rustc -vV | sha256sum | cut -d' ' -f1)"
+          echo "key=ih-regressions-v1-${RUNNER_OS}-${ImageVersion:-unknown}-$toolchain-$fingerprint" >> "$GITHUB_OUTPUT"
+
+      - name: Restore successful regression log
+        id: regression-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build-logs/engine-tests.log
+          key: ${{ steps.regression-key.outputs.key }}
+
+      - name: Verify cached regression result
+        if: steps.regression-cache.outputs.cache-hit == 'true'
+        run: |
+          test -s build-logs/engine-tests.log
+          echo "Exact regression result reused" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Cache host-side engine test artifacts
+        if: steps.regression-cache.outputs.cache-hit != 'true'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: android-new-engine-tests
           key: host-test-support
 
       - name: Set up host Rust compiler cache
+        if: steps.regression-cache.outputs.cache-hit != 'true'
         uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Enable compiler caching for engine tests
+        if: steps.regression-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
@@ -195,41 +220,34 @@ jobs:
           echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
 
       - name: Install Linux audio headers
+        if: steps.regression-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends pkg-config libasound2-dev
 
       - name: Run focused storage, renderer, mod, and input regressions
+        if: steps.regression-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p build-logs
           export VERA20K_COMMIT="$SOURCE_SHA"
           {
-            python -m tools.cargo_run -- test -p vera20k-core --lib util::config::tests::android_config_folder_is_canonical_and_root_config_is_a_migration_fallback
-            python -m tools.cargo_run -- test -p vera20k-core --lib util::config::tests::android_and_desktop_maps_use_the_shared_maps_directory
-            python -m tools.cargo_run -- test -p vera20k --lib app::mods::tests::managed_mod_selection_does_not_treat_descendants_as_profiles
-            python -m tools.cargo_run -- test -p vera20k-core --lib assets::asset_manager::install_inspection_tests::shared_ares_support_is_mod_only_and_a_mod_archive_takes_precedence
-            python -m tools.cargo_run -- test -p vera20k-core --lib util::ini_roots::tests::explicit_mo_profile_resolves_its_roots_and_requires_the_complete_triplet
-            python -m tools.cargo_run -- test -p vera20k-core --lib util::mod_definition::tests::mo_profile_defaults_to_mo_resources_and_manifest_overrides_only_named_slots
-            python -m tools.cargo_run -- test -p vera20k-core --lib util::mod_definition::tests::mental_omega_manifest_identity_selects_mo_without_changing_unknown_mods
-            python -m tools.cargo_run -- test -p vera20k-core --lib map::scenario_sources::tests::mental_omega_loose_catalog_discovers_and_loads_nested_maps
-            python -m tools.cargo_run -- test -p vera20k-core --lib map::scenario_sources::tests::client_catalog_without_native_mode_match_keeps_native_modes_and_shared_maps
-            python -m tools.cargo_run -- test -p vera20k-core --lib assets::client_install::tests::legacy_catalog_infers_modes_from_map_memberships_without_game_modes_registry
-            python -m tools.cargo_run -- test -p vera20k-core --lib map::scenario_sources::tests::catalog_map_paths_reject_parent_and_absolute_components
-            python -m tools.cargo_run -- test -p vera20k --lib app::persistence::options_profile::tests::launcher_renderer_write_is_narrow_persistent_and_rejects_desktop_only_apis
-            python -m tools.cargo_run -- test -p vera20k --lib app::persistence::startup_backend::tests::android_renderer_fallback_tries_one_alternate_backend_without_a_cycle
-            python -m tools.cargo_run -- test -p vera20k-core --lib assets::asset_manager::tests::mo_profile_resolves_and_loads_mo_roots_expansion_archive_and_mod_ares
-            python -m tools.cargo_run -- test -p vera20k --lib app::input::touch::
-            python -m tools.cargo_run -- test -p vera20k --lib app::input::camera::
-            python -m tools.cargo_run -- test -p vera20k --lib app::input::dispatch::android_hud_group_tests::
-            python -m tools.cargo_run -- test -p vera20k --lib render::skirmish_shell_chrome::
+            cargo test --locked -p vera20k-core --lib --features dev-overlays,test-support -- util::config::tests::android_config_folder_is_canonical_and_root_config_is_a_migration_fallback util::config::tests::android_and_desktop_maps_use_the_shared_maps_directory assets::asset_manager::install_inspection_tests::shared_ares_support_is_mod_only_and_a_mod_archive_takes_precedence util::ini_roots::tests::explicit_mo_profile_resolves_its_roots_and_requires_the_complete_triplet util::mod_definition::tests::mo_profile_defaults_to_mo_resources_and_manifest_overrides_only_named_slots util::mod_definition::tests::mental_omega_manifest_identity_selects_mo_without_changing_unknown_mods map::scenario_sources::tests::mental_omega_loose_catalog_discovers_and_loads_nested_maps map::scenario_sources::tests::client_catalog_without_native_mode_match_keeps_native_modes_and_shared_maps assets::client_install::tests::legacy_catalog_infers_modes_from_map_memberships_without_game_modes_registry map::scenario_sources::tests::catalog_map_paths_reject_parent_and_absolute_components assets::asset_manager::tests::mo_profile_resolves_and_loads_mo_roots_expansion_archive_and_mod_ares
+            cargo test --locked -p vera20k --lib -- app::mods::tests::managed_mod_selection_does_not_treat_descendants_as_profiles app::persistence::options_profile::tests::launcher_renderer_write_is_narrow_persistent_and_rejects_desktop_only_apis app::persistence::startup_backend::tests::android_renderer_fallback_tries_one_alternate_backend_without_a_cycle app::input::touch:: app::input::camera:: app::input::dispatch::android_hud_group_tests:: render::skirmish_shell_chrome::
           } 2>&1 | tee build-logs/engine-tests.log
 
       - name: Report host compiler cache statistics
-        if: always()
+        if: always() && steps.regression-cache.outputs.cache-hit != 'true'
         run: sccache --show-stats || true
+
+      - name: Save successful regression result
+        if: success() && steps.regression-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build-logs/engine-tests.log
+          key: ${{ steps.regression-key.outputs.key }}
 
       - name: Upload engine test log
         if: always()
