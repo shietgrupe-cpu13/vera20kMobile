@@ -764,6 +764,26 @@ jobs:
             exit 1
           fi
 
+
+      - name: Publish verified development APK as prerelease
+        if: success() && needs.prepare.outputs.build_type != 'release'
+        env:
+          GH_TOKEN: ${{ secrets.ANDROID_RELEASE_GITHUB_TOKEN || github.token }}
+          BUILD_TYPE: ${{ needs.prepare.outputs.build_type }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_label="$(sed -n 's/^val veraBuildLabel = "\([^"]*\)"$/\1/p' android/app/build.gradle.kts)"
+          apk="dist/IronHarborMobile ${build_label}.${BUILD_TYPE}.apk"
+          test -s "$apk"
+          tag="android-${build_label,,}-${BUILD_TYPE}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          gh release create "$tag" "$apk" dist/SHA256SUMS.txt dist/build-manifest.txt \
+            --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" \
+            --title "IronHarbor ${build_label} ${BUILD_TYPE} (CI ${GITHUB_RUN_ID})" \
+            --notes "Verified ARM64 development APK. Source: $SOURCE_SHA. Run: $GITHUB_RUN_ID." \
+            --prerelease --latest=false
+          echo "APK release: https://github.com/$GITHUB_REPOSITORY/releases/tag/$tag" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Publish verified B61 release
         if: >-
           success() && github.event_name == 'workflow_dispatch' &&
